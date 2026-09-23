@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bread-ascii-art"
+version = "0.1.0"
+description = "Convert images and GIFs into ASCII art (text + rendered PNG/GIF)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pillow>=10.0.0",
+]
+
+[project.scripts]
+ascii-art = "ascii_art.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

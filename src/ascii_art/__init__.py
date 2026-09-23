@@ -1,4 +1,4 @@
-"""Image / GIF → ASCII art."""
+"""Image / GIF → ASCII art, plus topic-driven animation inventing."""
 
 from .converter import (
     DEFAULT_CHARSET,
@@ -8,6 +8,8 @@ from .converter import (
     image_to_ascii,
     image_to_cells,
 )
+from .invent import invent_animations, load_topic, pick_variations, write_variation
+from .procedural import STYLE_BLURBS, STYLES
 from .render import (
     render_ascii_cells,
     render_ascii_gif,
@@ -17,6 +19,8 @@ from .render import (
 
 __all__ = [
     "DEFAULT_CHARSET",
+    "STYLES",
+    "STYLE_BLURBS",
     "image_to_ascii",
     "image_to_cells",
     "cells_to_text",
@@ -26,6 +30,10 @@ __all__ = [
     "render_ascii_gif",
     "render_ascii_cells",
     "render_cells_gif",
+    "invent_animations",
+    "pick_variations",
+    "load_topic",
+    "write_variation",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

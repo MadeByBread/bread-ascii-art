@@ -1,66 +1,87 @@
-"""CLI for ascii-art."""
+"""CLI for bread-ascii-art."""
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
 from .converter import DEFAULT_CHAR_ASPECT, DEFAULT_CHARSET, frames_to_ascii, parse_aspect
+from .invent import invent_animations, load_topic, write_variation
+from .procedural import STYLE_BLURBS, STYLES
 from .render import font_char_aspect, render_ascii_gif, render_ascii_image, save_gif
+
+
+def _slug(text: str, limit: int = 40) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return (slug[:limit] or "invent").rstrip("-")
+
+
+def _add_shared_render_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("-w", "--width", type=int, default=120, help="Character columns (default: 120)")
+    p.add_argument("-a", "--aspect", default="16:9", help="Aspect ratio (default: 16:9)")
+    p.add_argument("--font-size", type=int, default=12, help="Render font size (default: 12)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ascii-art",
-        description="Convert an image or GIF into ASCII art (text + PNG/GIF).",
+        description="Convert images/GIFs to ASCII, or invent animations from a topic/blog.",
     )
-    p.add_argument("input", type=Path, help="Path to an image or GIF")
-    p.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        help="Output directory or file path (extension selects format)",
-    )
-    p.add_argument(
+    sub = p.add_subparsers(dest="command")
+
+    # convert (also the default if first arg is a file path)
+    c = sub.add_parser("convert", help="Convert an image or GIF to ASCII")
+    c.add_argument("input", type=Path, help="Path to an image or GIF")
+    c.add_argument("-o", "--output", type=Path, help="Output directory or file path")
+    c.add_argument(
         "-f",
         "--format",
         choices=("txt", "png", "gif", "both"),
         default="both",
-        help="Output format (default: both = .txt + rendered image)",
     )
-    p.add_argument(
-        "-w",
-        "--width",
-        type=int,
-        default=120,
-        help="Character width / columns (default: 120)",
+    c.add_argument("--char-aspect", type=float, default=None)
+    c.add_argument("--charset", default=DEFAULT_CHARSET)
+    c.add_argument("--invert", action="store_true")
+    c.add_argument("--no-contrast", action="store_true")
+    _add_shared_render_args(c)
+    c.set_defaults(font_size=14)
+
+    # invent
+    i = sub.add_parser(
+        "invent",
+        help="Generate random ASCII animation variations from a topic or blog post",
     )
-    p.add_argument(
-        "-a",
-        "--aspect",
-        default="16:9",
-        help="Output aspect ratio as W:H or float (default: 16:9)",
-    )
-    p.add_argument(
-        "--char-aspect",
-        type=float,
+    i.add_argument(
+        "topic",
+        nargs="?",
         default=None,
-        help=f"Monospace cell width/height (default: auto from font, else {DEFAULT_CHAR_ASPECT})",
+        help="Topic or short brief (optional if --file/--url given)",
     )
-    p.add_argument(
-        "--charset",
-        default=DEFAULT_CHARSET,
-        help=f'Character ramp dark→bright (default: "{DEFAULT_CHARSET}")',
-    )
-    p.add_argument("--invert", action="store_true", help="Invert luminance mapping")
-    p.add_argument("--no-contrast", action="store_true", help="Disable autocontrast")
-    p.add_argument(
-        "--font-size",
+    i.add_argument("--file", type=Path, help="Blog post / markdown / text file")
+    i.add_argument("--url", help="Blog post URL to fetch")
+    i.add_argument(
+        "-n",
+        "--count",
         type=int,
-        default=14,
-        help="Font size for PNG/GIF render (default: 14)",
+        default=3,
+        help="How many random variations to generate (default: 3)",
     )
+    i.add_argument(
+        "--style",
+        action="append",
+        dest="styles",
+        help="Force style(s); repeatable. Default: pick from topic keywords",
+    )
+    i.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility")
+    i.add_argument("-o", "--output", type=Path, default=Path("output"), help="Output directory")
+    _add_shared_render_args(i)
+
+    # styles
+    s = sub.add_parser("styles", help="List available animation styles")
+    s.add_argument("--json", action="store_true", help="Machine-readable list")
+
     return p
 
 
@@ -70,14 +91,10 @@ def _resolve_targets(
     fmt: str,
     animated: bool,
 ) -> dict[str, Path | None]:
-    """Map format keys to destination paths. None means print to stdout."""
     suffix = output.suffix.lower() if output and output.suffix else ""
-
-    # Explicit file path selects a single format
     if output and suffix in {".txt", ".png", ".gif"}:
         return {suffix.lstrip("."): output}
 
-    # Directory → keep input stem inside it; bare path → use as stem
     if output is None:
         base = Path("output") / input_path.stem
     elif output.is_dir() or (suffix == "" and output.exists() and output.is_dir()):
@@ -87,14 +104,13 @@ def _resolve_targets(
 
     base.parent.mkdir(parents=True, exist_ok=True)
     targets: dict[str, Path | None] = {}
-
     if fmt == "txt":
         targets["txt"] = None if output is None else base.with_suffix(".txt")
     elif fmt == "png":
         targets["png"] = base.with_suffix(".png")
     elif fmt == "gif":
         targets["gif"] = base.with_suffix(".gif")
-    else:  # both
+    else:
         targets["txt"] = base.with_suffix(".txt")
         if animated:
             targets["gif"] = base.with_suffix(".gif")
@@ -103,8 +119,7 @@ def _resolve_targets(
     return targets
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+def _cmd_convert(args: argparse.Namespace) -> int:
     input_path: Path = args.input
     if not input_path.exists():
         print(f"error: input not found: {input_path}", file=sys.stderr)
@@ -112,7 +127,6 @@ def main(argv: list[str] | None = None) -> int:
 
     char_aspect = args.char_aspect
     if char_aspect is None:
-        # Match the renderer so PNG/GIF aspect lands on --aspect.
         char_aspect = font_char_aspect(args.font_size) or DEFAULT_CHAR_ASPECT
 
     frames = frames_to_ascii(
@@ -160,7 +174,91 @@ def main(argv: list[str] | None = None) -> int:
         else:
             images[0].save(dest)
         print(f"wrote {dest}")
+    return 0
 
+
+def _cmd_invent(args: argparse.Namespace) -> int:
+    try:
+        text = load_topic(topic=args.topic, file=args.file, url=args.url)
+    except Exception as exc:  # noqa: BLE001 — surface fetch/parse errors cleanly
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    out_dir: Path = args.output
+    out_dir.mkdir(parents=True, exist_ok=True)
+    slug = _slug(args.topic or (args.file.stem if args.file else "blog"))
+
+    print(f"inventing {args.count} variation(s) from topic ({len(text)} chars)…")
+    results = invent_animations(
+        text,
+        count=args.count,
+        seed=args.seed,
+        styles=args.styles,
+        width=args.width,
+        aspect=args.aspect,
+        font_size=args.font_size,
+    )
+    for idx, (variation, frames) in enumerate(results, start=1):
+        stem = out_dir / f"{slug}-{idx:02d}-{variation.style}"
+        written = write_variation(variation, frames, stem, font_size=args.font_size)
+        print(
+            f"[{idx}/{len(results)}] {variation.style} — {variation.reason} "
+            f"(seed={variation.seed}, palette={variation.params.get('palette')})"
+        )
+        for kind, path in written.items():
+            print(f"  {kind}: {path}")
+    return 0
+
+
+def _cmd_styles(args: argparse.Namespace) -> int:
+    if args.json:
+        import json
+
+        print(json.dumps({k: STYLE_BLURBS[k] for k in STYLES}, indent=2))
+        return 0
+    print("Available styles (inspired by asciiart.eu/animations):\n")
+    for name in sorted(STYLES):
+        print(f"  {name:14}  {STYLE_BLURBS.get(name, '')}")
+    print("\nPalettes:", ", ".join(sorted(__import__('ascii_art.effects', fromlist=['PALETTES']).PALETTES)))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # Back-compat: `ascii-art photo.jpg` → convert
+    if argv and not argv[0].startswith("-") and argv[0] not in {
+        "convert",
+        "invent",
+        "styles",
+        "help",
+    }:
+        candidate = Path(argv[0])
+        if candidate.exists() or candidate.suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+        }:
+            argv = ["convert", *argv]
+
+    parser = _build_parser()
+    if not argv:
+        parser.print_help()
+        return 0
+
+    args = parser.parse_args(argv)
+    if args.command == "convert":
+        return _cmd_convert(args)
+    if args.command == "invent":
+        return _cmd_invent(args)
+    if args.command == "styles":
+        return _cmd_styles(args)
+    parser.print_help()
     return 0
 
 

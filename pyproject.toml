@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bread-ascii-art"
-version = "0.1.0"
-description = "Convert images and GIFs into ASCII art (text + rendered PNG/GIF)"
+version = "0.2.0"
+description = "ASCII art from images/GIFs, plus topic-driven animation inventing"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

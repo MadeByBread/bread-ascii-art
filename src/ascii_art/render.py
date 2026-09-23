@@ -6,6 +6,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .converter import CellGrid
+
 # Prefer common monospace fonts; fall back to Pillow default.
 _FONT_CANDIDATES = [
     "/System/Library/Fonts/Menlo.ttc",
@@ -46,12 +48,12 @@ def font_char_aspect(font_size: int = 14) -> float | None:
     return None
 
 
-def _measure(lines: list[str], font: ImageFont.ImageFont, padding: int) -> tuple[int, int, int]:
-    """Return (img_w, img_h, line_height)."""
+def _measure(
+    cols: int, rows: int, font: ImageFont.ImageFont, padding: int
+) -> tuple[int, int, int, int]:
+    """Return (img_w, img_h, char_w, line_h)."""
     char_w, line_h = _glyph_metrics(font)
-    cols = max((len(line) for line in lines), default=1)
-    rows = max(len(lines), 1)
-    return cols * char_w + padding * 2, rows * line_h + padding * 2, line_h
+    return cols * char_w + padding * 2, rows * line_h + padding * 2, char_w, line_h
 
 
 def render_ascii_image(
@@ -62,16 +64,58 @@ def render_ascii_image(
     bg: tuple[int, int, int] = (0, 0, 0),
     padding: int = 24,
 ) -> Image.Image:
-    """Rasterize ASCII text onto a solid background."""
+    """Rasterize mono ASCII text onto a solid background."""
     lines = ascii_text.splitlines() or [""]
+    cols = max((len(line) for line in lines), default=1)
+    rows = max(len(lines), 1)
     font = _load_font(font_size)
-    width, height, line_h = _measure(lines, font, padding)
+    width, height, _, line_h = _measure(cols, rows, font, padding)
     img = Image.new("RGB", (width, height), bg)
     draw = ImageDraw.Draw(img)
     y = padding
     for line in lines:
         draw.text((padding, y), line, fill=fg, font=font)
         y += line_h
+    return img
+
+
+def render_ascii_cells(
+    cells: CellGrid,
+    *,
+    font_size: int = 14,
+    bg: tuple[int, int, int] = (0, 0, 0),
+    padding: int = 12,
+) -> Image.Image:
+    """Rasterize a colored (char, rgb) grid."""
+    if not cells:
+        return Image.new("RGB", (1, 1), bg)
+    rows = len(cells)
+    cols = max(len(row) for row in cells)
+    font = _load_font(font_size)
+    width, height, char_w, line_h = _measure(cols, rows, font, padding)
+    img = Image.new("RGB", (width, height), bg)
+    draw = ImageDraw.Draw(img)
+
+    # Draw runs of same color for speed.
+    for y, row in enumerate(cells):
+        x = 0
+        while x < len(row):
+            ch, color = row[x]
+            if ch == " ":
+                x += 1
+                continue
+            run_chars = [ch]
+            j = x + 1
+            while j < len(row) and row[j][0] != " " and row[j][1] == color:
+                run_chars.append(row[j][0])
+                j += 1
+            draw.text(
+                (padding + x * char_w, padding + y * line_h),
+                "".join(run_chars),
+                fill=color,
+                font=font,
+            )
+            x = j
     return img
 
 
@@ -90,6 +134,19 @@ def render_ascii_gif(
     ]
 
 
+def render_cells_gif(
+    frames: list[tuple[CellGrid, int]],
+    *,
+    font_size: int = 14,
+    bg: tuple[int, int, int] = (0, 0, 0),
+    padding: int = 12,
+) -> list[Image.Image]:
+    return [
+        render_ascii_cells(cells, font_size=font_size, bg=bg, padding=padding)
+        for cells, _ in frames
+    ]
+
+
 def save_gif(
     images: list[Image.Image],
     durations: list[int],
@@ -99,11 +156,15 @@ def save_gif(
 ) -> None:
     if not images:
         raise ValueError("no frames to save")
-    images[0].save(
+    quantized = [
+        im.convert("P", palette=Image.Palette.ADAPTIVE, colors=128) for im in images
+    ]
+    quantized[0].save(
         path,
         save_all=True,
-        append_images=images[1:],
+        append_images=quantized[1:],
         duration=durations,
         loop=loop,
         optimize=False,
+        disposal=2,
     )

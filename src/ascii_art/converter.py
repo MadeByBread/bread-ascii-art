@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 from PIL import Image, ImageOps, ImageSequence
 
@@ -13,6 +13,12 @@ DEFAULT_CHARSET = " .:+CU=&$R#"
 # Monospace cell width/height. ~0.72 matches Menlo/SF Mono with light leading;
 # use ~0.5–0.6 for many terminal emulators if text looks stretched.
 DEFAULT_CHAR_ASPECT = 0.72
+
+FitMode = Literal["fit", "cover"]
+
+# One cell: character + RGB foreground.
+Cell = tuple[str, tuple[int, int, int]]
+CellGrid = list[list[Cell]]
 
 
 def parse_aspect(value: str | float) -> float:
@@ -43,62 +49,121 @@ def grid_size(
     return width, rows
 
 
-def _to_luma(img: Image.Image) -> Image.Image:
+def _to_rgba(img: Image.Image) -> Image.Image:
     if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
         rgba = img.convert("RGBA")
         background = Image.new("RGBA", rgba.size, (0, 0, 0, 255))
-        composited = Image.alpha_composite(background, rgba)
-        return composited.convert("L")
-    return img.convert("L")
+        return Image.alpha_composite(background, rgba)
+    return img.convert("RGBA")
 
 
-def _fit_to_grid(img: Image.Image, cols: int, rows: int) -> Image.Image:
-    """Letterbox the image into cols×rows (black fill)."""
-    src = _to_luma(img)
+def _resize_to_grid(
+    img: Image.Image,
+    cols: int,
+    rows: int,
+    *,
+    mode: FitMode = "fit",
+    fill: tuple[int, int, int] = (0, 0, 0),
+) -> Image.Image:
+    """Resize RGBA/RGB into cols×rows with letterbox (fit) or crop (cover)."""
+    src = _to_rgba(img)
     src_w, src_h = src.size
     if src_w == 0 or src_h == 0:
-        return Image.new("L", (cols, rows), 0)
+        return Image.new("RGBA", (cols, rows), (*fill, 255))
 
-    scale = min(cols / src_w, rows / src_h)
+    if mode == "cover":
+        scale = max(cols / src_w, rows / src_h)
+    else:
+        scale = min(cols / src_w, rows / src_h)
+
     new_w = max(1, round(src_w * scale))
     new_h = max(1, round(src_h * scale))
     resized = src.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-    canvas = Image.new("L", (cols, rows), 0)
+    canvas = Image.new("RGBA", (cols, rows), (*fill, 255))
     offset = ((cols - new_w) // 2, (rows - new_h) // 2)
-    canvas.paste(resized, offset)
+    canvas.paste(resized, offset, resized)
     return canvas
 
 
-def _pixels_to_ascii(
-    img: Image.Image,
+def _luma_of(rgb: tuple[int, int, int]) -> int:
+    r, g, b = rgb
+    return int(0.299 * r + 0.587 * g + 0.114 * b)
+
+
+def _char_for_luma(
+    value: int,
     charset: str,
+    *,
     invert: bool = False,
-    black_point: int = 12,
+    black_point: int = 8,
 ) -> str:
+    n = len(charset) - 1
+    if invert:
+        value = 255 - value
+    if value <= black_point:
+        return " "
+    scaled = (value - black_point) / (255 - black_point)
+    idx = max(1, round(scaled * n))
+    return charset[min(idx, n)]
+
+
+def _boost_contrast_rgb(img: Image.Image) -> Image.Image:
+    """Autocontrast on RGB while keeping hue relationships."""
+    return ImageOps.autocontrast(img.convert("RGB")).convert("RGBA")
+
+
+def image_to_cells(
+    source: Image.Image | str | Path,
+    *,
+    width: int = 120,
+    aspect: float | str = 16 / 9,
+    char_aspect: float = DEFAULT_CHAR_ASPECT,
+    charset: str = DEFAULT_CHARSET,
+    invert: bool = False,
+    contrast: bool = True,
+    fit: FitMode = "fit",
+    fill: tuple[int, int, int] = (0, 0, 0),
+    black_point: int = 8,
+    color: bool = True,
+) -> CellGrid:
+    """Convert an image to a grid of (char, rgb) cells."""
+    if not isinstance(source, Image.Image):
+        img = Image.open(source)
+        img.load()
+    else:
+        img = source
+
     if not charset:
         raise ValueError("charset must not be empty")
 
-    pixels = list(img.getdata())
-    cols, rows = img.size
-    n = len(charset) - 1
-    lines: list[str] = []
+    cols, rows = grid_size(width, parse_aspect(aspect), char_aspect)
+    fitted = _resize_to_grid(img, cols, rows, mode=fit, fill=fill)
+    if contrast:
+        fitted = _boost_contrast_rgb(fitted)
+
+    rgb = fitted.convert("RGB")
+    pixels = list(rgb.getdata())
+    default_fg = (200, 200, 200)
+    grid: CellGrid = []
     for y in range(rows):
-        row_chars: list[str] = []
+        row: list[Cell] = []
         for x in range(cols):
-            value = pixels[y * cols + x]
-            if invert:
-                value = 255 - value
-            # Keep true blacks as spaces so letterboxing stays clean.
-            if value <= black_point:
-                row_chars.append(charset[0] if charset[0] == " " else " ")
-                continue
-            # Remap remaining range across the full ramp.
-            scaled = (value - black_point) / (255 - black_point)
-            idx = max(1, round(scaled * n))
-            row_chars.append(charset[min(idx, n)])
-        lines.append("".join(row_chars))
-    return "\n".join(lines)
+            pix = pixels[y * cols + x]
+            luma = _luma_of(pix)
+            ch = _char_for_luma(luma, charset, invert=invert, black_point=black_point)
+            if ch == " ":
+                row.append((" ", fill))
+            elif color:
+                row.append((ch, pix))
+            else:
+                row.append((ch, default_fg))
+        grid.append(row)
+    return grid
+
+
+def cells_to_text(cells: CellGrid) -> str:
+    return "\n".join("".join(ch for ch, _ in row) for row in cells)
 
 
 def image_to_ascii(
@@ -110,19 +175,23 @@ def image_to_ascii(
     charset: str = DEFAULT_CHARSET,
     invert: bool = False,
     contrast: bool = True,
+    fit: FitMode = "fit",
+    fill: tuple[int, int, int] = (0, 0, 0),
 ) -> str:
     """Convert a still image to an ASCII string."""
-    if not isinstance(source, Image.Image):
-        img = Image.open(source)
-        img.load()
-    else:
-        img = source
-
-    cols, rows = grid_size(width, parse_aspect(aspect), char_aspect)
-    fitted = _fit_to_grid(img, cols, rows)
-    if contrast:
-        fitted = ImageOps.autocontrast(fitted)
-    return _pixels_to_ascii(fitted, charset, invert=invert)
+    cells = image_to_cells(
+        source,
+        width=width,
+        aspect=aspect,
+        char_aspect=char_aspect,
+        charset=charset,
+        invert=invert,
+        contrast=contrast,
+        fit=fit,
+        fill=fill,
+        color=False,
+    )
+    return cells_to_text(cells)
 
 
 def iter_frames(source: Image.Image | str | Path) -> Iterable[tuple[Image.Image, int]]:
@@ -134,7 +203,6 @@ def iter_frames(source: Image.Image | str | Path) -> Iterable[tuple[Image.Image,
 
     for frame in ImageSequence.Iterator(img):
         duration = int(frame.info.get("duration", 100) or 100)
-        # Copy so subsequent seeks don't mutate earlier frames.
         yield frame.copy().convert("RGBA"), duration
 
 
@@ -147,6 +215,7 @@ def frames_to_ascii(
     charset: str = DEFAULT_CHARSET,
     invert: bool = False,
     contrast: bool = True,
+    fit: FitMode = "fit",
 ) -> list[tuple[str, int]]:
     """Convert every frame to ASCII. Returns list of (ascii_text, duration_ms)."""
     return [
@@ -159,6 +228,41 @@ def frames_to_ascii(
                 charset=charset,
                 invert=invert,
                 contrast=contrast,
+                fit=fit,
+            ),
+            duration,
+        )
+        for frame, duration in iter_frames(source)
+    ]
+
+
+def frames_to_cells(
+    source: Image.Image | str | Path,
+    *,
+    width: int = 120,
+    aspect: float | str = 16 / 9,
+    char_aspect: float = DEFAULT_CHAR_ASPECT,
+    charset: str = DEFAULT_CHARSET,
+    invert: bool = False,
+    contrast: bool = True,
+    fit: FitMode = "fit",
+    fill: tuple[int, int, int] = (0, 0, 0),
+    color: bool = True,
+) -> list[tuple[CellGrid, int]]:
+    """Convert every frame to a colored cell grid."""
+    return [
+        (
+            image_to_cells(
+                frame,
+                width=width,
+                aspect=aspect,
+                char_aspect=char_aspect,
+                charset=charset,
+                invert=invert,
+                contrast=contrast,
+                fit=fit,
+                fill=fill,
+                color=color,
             ),
             duration,
         )

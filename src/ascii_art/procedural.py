@@ -66,7 +66,11 @@ def starfield(
             x = int(cx + s["x"] * k * cols * 0.5)
             y = int(cy + s["y"] * k * rows * 0.5)
             t = 1.0 - z
-            set_cell(grid, x, y, s["c"] if t > 0.4 else ".", palette_color(colors, t))
+            set_cell(grid, x, y, s["c"] if t > 0.4 else ".", palette_color(colors, max(0.35, t)))
+            # Spread a second glyph so the field stays dense away from the vanishing point.
+            sx = int((s["x"] * 0.5 + 0.5) * (cols - 1))
+            sy = int((s["y"] * 0.5 + 0.5) * (rows - 1) + f * 0.35 * speed) % rows
+            set_cell(grid, sx, sy, s["c"], palette_color(colors, 0.45 + 0.4 * t))
         out.append((grid, duration))
     return out
 
@@ -81,6 +85,7 @@ def matrix(
     density: float = 0.55,
     speed: float = 1.0,
     glitch: float = 0.02,
+    trail: float = 0.5,
     palette: str = "matrix",
     charset: str = "01アイウエオカキクケコabcdefghijklmnopqrstuvwxyz#$%&",
     bg: RGB = (0, 0, 0),
@@ -88,16 +93,26 @@ def matrix(
     rng = _rng(seed)
     colors = PALETTES.get(palette, PALETTES["matrix"])
     drops = []
+    trail_hi = max(8, int(rows * max(0.2, trail)))
     for x in range(cols):
         if rng.random() < density:
             drops.append(
                 {
                     "x": x,
                     "y": rng.uniform(-rows, rows),
-                    "len": rng.randint(6, max(8, rows // 2)),
+                    "len": rng.randint(max(6, trail_hi // 2), trail_hi),
                     "spd": rng.uniform(0.6, 1.6) * speed,
                 }
             )
+            if trail >= 1:
+                drops.append(
+                    {
+                        "x": x,
+                        "y": rng.uniform(-rows, rows),
+                        "len": trail_hi,
+                        "spd": rng.uniform(0.5, 1.3) * speed,
+                    }
+                )
     out: list[tuple[CellGrid, int]] = []
     for f in range(frames):
         grid = empty_grid(cols, rows, bg)
@@ -105,6 +120,8 @@ def matrix(
             head = d["y"] + f * d["spd"]
             for i in range(d["len"]):
                 y = int(head - i)
+                if trail >= 1:
+                    y %= rows
                 if 0 <= y < rows:
                     t = 1.0 - i / d["len"]
                     ch = rng.choice(charset)
@@ -124,6 +141,7 @@ def fire(
     seed: int | None = 0,
     wind: float = 0.35,
     intensity: float = 1.0,
+    decay: float = 1.0,
     palette: str = "fire",
     charset: str = " .:+*#$&@",
     bg: RGB = (0, 0, 0),
@@ -148,7 +166,7 @@ def fire(
                     + heat[y + 1][max(0, src_x - 1)]
                     + heat[y + 1][min(cols - 1, src_x + 1)]
                 ) / 3.0
-                heat[y][x] = max(0.0, below - rng.uniform(0.02, 0.08))
+                heat[y][x] = max(0.0, below - rng.uniform(0.02, 0.08) * decay)
         grid = empty_grid(cols, rows, bg)
         for y in range(rows):
             for x in range(cols):
@@ -407,6 +425,7 @@ def kaleidoscope(
     seed: int | None = 0,
     segments: int = 8,
     speed: float = 1.0,
+    threshold: float = 0.35,
     palette: str = "galaxy",
     charset: str = DEFAULT_CHARSET,
     bg: RGB = (0, 0, 0),
@@ -427,7 +446,7 @@ def kaleidoscope(
                 r = math.hypot(dx, dy)
                 v = math.sin(r * 0.35 - f * 0.15 * speed) * math.cos(seg * 6)
                 n = (v + 1) / 2
-                if n > 0.35:
+                if n > threshold:
                     set_cell(
                         grid,
                         x,
@@ -448,6 +467,7 @@ def galaxy(
     seed: int | None = 0,
     arms: int = 3,
     speed: float = 1.0,
+    density: float = 0.08,
     palette: str = "galaxy",
     charset: str = " .:+*oO@",
     bg: RGB = (0, 0, 8),
@@ -456,20 +476,35 @@ def galaxy(
     colors = PALETTES.get(palette, PALETTES["galaxy"])
     cx, cy = cols / 2, rows / 2
     stars = []
-    for _ in range(int(cols * rows * 0.08)):
-        stars.append(
-            {
-                "r": rng.uniform(0.5, min(cols, rows) * 0.48),
-                "a": rng.uniform(0, math.tau),
-                "arm": rng.randint(0, arms - 1),
-                "ch": rng.choice(charset[2:]),
-            }
-        )
+    for _ in range(max(12, int(cols * rows * density))):
+        ch = rng.choice(charset[2:] or charset)
+        if rng.random() < 0.72:
+            stars.append(
+                {
+                    "dust": True,
+                    "x": rng.randrange(cols),
+                    "y": rng.randrange(rows),
+                    "ch": ch,
+                }
+            )
+        else:
+            stars.append(
+                {
+                    "dust": False,
+                    "r": rng.uniform(0.5, min(cols, rows) * 0.48),
+                    "a": rng.uniform(0, math.tau),
+                    "arm": rng.randint(0, max(0, arms - 1)),
+                    "ch": ch,
+                }
+            )
     out: list[tuple[CellGrid, int]] = []
     for f in range(frames):
         grid = empty_grid(cols, rows, bg)
         rot = f * 0.07 * speed
         for s in stars:
+            if s["dust"]:
+                set_cell(grid, s["x"], s["y"], s["ch"], palette_color(colors, 0.35))
+                continue
             a = s["a"] + rot + s["arm"] * (math.tau / arms) + s["r"] * 0.08
             x = int(cx + math.cos(a) * s["r"])
             y = int(cy + math.sin(a) * s["r"] * 0.55)
@@ -654,15 +689,19 @@ def horizon(
             half = int(2 + p * cols * 0.42)
             cx = cols // 2
             left, right = cx - half, cx + half
-            road_col = palette_color(colors, 0.15 + p * 0.25)
-            for x in range(max(0, left), min(cols, right + 1)):
-                set_cell(grid, x, y, charset[min(len(charset) - 1, int(p * 3) + 1)], road_col)
+            road_col = palette_color(colors, 0.35 + p * 0.45)
+            shoulder = palette_color(colors, 0.45 + p * 0.2)
+            for x in range(cols):
+                if left <= x <= right:
+                    set_cell(grid, x, y, charset[min(len(charset) - 1, int(p * 3) + 1)], road_col)
+                else:
+                    set_cell(grid, x, y, "." if (x + y + f) % 2 == 0 else ":", shoulder)
             # shoulders
             set_cell(grid, left, y, "#", palette_color(colors, 0.7))
             set_cell(grid, right, y, "#", palette_color(colors, 0.7))
             # center dashes
             if int((y + offset) / 3) % 2 == 0 and half > 4:
-                set_cell(grid, cx, y, "=", (255, 220, 100))
+                set_cell(grid, cx, y, "=", palette_color(colors, 0.95))
         # roadside posts scrolling
         for side in (-1, 1):
             for i in range(6):
